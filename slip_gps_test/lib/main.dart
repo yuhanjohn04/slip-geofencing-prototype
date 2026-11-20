@@ -281,12 +281,13 @@ class _FieldTestPageState extends State<FieldTestPage> {
       } else {
         setState(() {
           _distanceM = 0;
-          _setState(
-            AttendanceState.inBranch,
-            distance: 0,
-            accuracy: pos.accuracy,
-          );
+          _setState(AttendanceState.inBranch);
         });
+        _addLog(
+          'Check-in (entered location)',
+          distance: 0,
+          accuracy: pos.accuracy,
+        );
       }
     } catch (e) {
       setState(() => _streamStatus = 'Could not set branch: $e');
@@ -383,7 +384,6 @@ class _FieldTestPageState extends State<FieldTestPage> {
     });
     // Still show on map, but skip geofence flips on very noisy fixes.
     if (poor) {
-      _addLog('GPS ping ignored (noisy)', accuracy: pos.accuracy);
       return;
     }
     _evaluate(pos);
@@ -397,7 +397,6 @@ class _FieldTestPageState extends State<FieldTestPage> {
           _state = AttendanceState.waiting;
         }
       });
-      _addLog('GPS ping (set branch first)', accuracy: pos.accuracy);
       return;
     }
 
@@ -419,83 +418,54 @@ class _FieldTestPageState extends State<FieldTestPage> {
       _graceTicker = null;
       _graceDeadline = null;
       _graceSecondsLeft = 0;
-      if (_state == AttendanceState.gracePeriod) {
-        _addLog(
-          'Check-in (returned during grace)',
-          distance: dist,
-          accuracy: pos.accuracy,
-        );
-      } else if (_state == AttendanceState.inBranch) {
-        _addLog(
-          'GPS ping (checked in)',
-          distance: dist,
-          accuracy: pos.accuracy,
-        );
-      } else {
-        _addLog('Check-in', distance: dist, accuracy: pos.accuracy);
+
+      if (_state != AttendanceState.inBranch) {
+        if (_state == AttendanceState.gracePeriod) {
+          _addLog(
+            'Check-in (returned during grace)',
+            distance: dist,
+            accuracy: pos.accuracy,
+          );
+        } else {
+          _addLog(
+            'Check-in (entered location)',
+            distance: dist,
+            accuracy: pos.accuracy,
+          );
+        }
+        _setState(AttendanceState.inBranch);
       }
-      _setState(
-        AttendanceState.inBranch,
-        distance: dist,
-        accuracy: pos.accuracy,
-      );
     } else if (_state == AttendanceState.inBranch && !beyondCheckOut) {
       // Hysteresis band: between check-in and check-out — stay checked in
-      _addLog(
-        'GPS ping (hysteresis band)',
-        distance: dist,
-        accuracy: pos.accuracy,
-      );
-    } else if (beyondCheckOut || _state == AttendanceState.inBranch) {
-      // CHECK-OUT: crossed outer radius (or left without hysteresis)
-      if (_state == AttendanceState.inBranch ||
-          _state == AttendanceState.waiting) {
+      // Do nothing: keep state and do not log repeated pings.
+    } else if (beyondCheckOut) {
+      // CHECK-OUT: crossed outer radius
+      if (_state == AttendanceState.inBranch) {
         _addLog(
-          'Check-out (left radius)',
+          'Check-out (exited location)',
           distance: dist,
           accuracy: pos.accuracy,
         );
         _startGrace(dist, pos.accuracy);
       } else if (_state == AttendanceState.gracePeriod) {
         _refreshGraceCountdown();
-        _addLog(
-          'GPS ping (still in grace)',
-          distance: dist,
-          accuracy: pos.accuracy,
-        );
-      } else {
-        _addLog(
-          'GPS ping (outside / checked out)',
-          distance: dist,
-          accuracy: pos.accuracy,
-        );
+      } else if (_state == AttendanceState.waiting) {
+        _setState(AttendanceState.outside);
       }
     } else if (_state == AttendanceState.gracePeriod) {
       _refreshGraceCountdown();
-      _addLog(
-        'GPS ping (still in grace)',
-        distance: dist,
-        accuracy: pos.accuracy,
-      );
-    } else {
-      _addLog(
-        'GPS ping (outside check-in)',
-        distance: dist,
-        accuracy: pos.accuracy,
-      );
     }
   }
 
   void _startGrace(double dist, double accuracy) {
     final secs = _graceSeconds;
+    if (secs <= 0) {
+      _setState(AttendanceState.outside);
+      return;
+    }
     _graceDeadline = DateTime.now().add(Duration(seconds: secs));
     _graceSecondsLeft = secs;
-    _setState(AttendanceState.gracePeriod, distance: dist, accuracy: accuracy);
-    _addLog(
-      'Grace period started (${secs}s)',
-      distance: dist,
-      accuracy: accuracy,
-    );
+    _setState(AttendanceState.gracePeriod);
 
     _graceTicker?.cancel();
     _graceTicker = Timer.periodic(const Duration(milliseconds: 200), (_) {
@@ -507,16 +477,7 @@ class _FieldTestPageState extends State<FieldTestPage> {
         _graceTicker = null;
         _graceDeadline = null;
         setState(() => _graceSecondsLeft = 0);
-        _setState(
-          AttendanceState.outside,
-          distance: _distanceM,
-          accuracy: _position?.accuracy,
-        );
-        _addLog(
-          'Grace expired → OUTSIDE',
-          distance: _distanceM,
-          accuracy: _position?.accuracy,
-        );
+        _setState(AttendanceState.outside);
       } else {
         setState(() => _graceSecondsLeft = left.ceil());
       }
@@ -530,23 +491,10 @@ class _FieldTestPageState extends State<FieldTestPage> {
     setState(() => _graceSecondsLeft = left < 0 ? 0 : left.ceil());
   }
 
-  void _setState(AttendanceState next, {double? distance, double? accuracy}) {
+  void _setState(AttendanceState next) {
     if (next == _state) return;
-    final prev = _state;
     setState(() => _state = next);
-    _addLog(
-      'State: ${_label(prev)} → ${_label(next)}',
-      distance: distance,
-      accuracy: accuracy,
-    );
   }
-
-  String _label(AttendanceState s) => switch (s) {
-    AttendanceState.waiting => 'WAITING',
-    AttendanceState.inBranch => 'IN_BRANCH',
-    AttendanceState.gracePeriod => 'GRACE_PERIOD',
-    AttendanceState.outside => 'OUTSIDE',
-  };
 
   void _clearLogs() => setState(() => _logs.clear());
 
@@ -672,7 +620,7 @@ class _FieldTestPageState extends State<FieldTestPage> {
                   const SizedBox(height: 16),
                   Row(
                     children: [
-                      _sectionTitle('Event Log'),
+                      _sectionTitle('Activity Log'),
                       const Spacer(),
                       TextButton(
                         onPressed: _logs.isEmpty ? null : _clearLogs,
@@ -692,7 +640,7 @@ class _FieldTestPageState extends State<FieldTestPage> {
                       child: _logs.isEmpty
                           ? const Center(
                               child: Text(
-                                'No events yet',
+                                'No activity yet',
                                 style: TextStyle(color: Colors.black45),
                               ),
                             )
