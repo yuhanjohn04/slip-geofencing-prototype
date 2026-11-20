@@ -1,7 +1,11 @@
 import 'dart:async';
 
+import 'package:flutter_map/flutter_map.dart';
 import 'package:geolocator/geolocator.dart';
+import 'package:latlong2/latlong.dart';
 import 'package:material_ui/material_ui.dart';
+
+import 'geofence_map.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -37,9 +41,11 @@ class FieldTestPage extends StatefulWidget {
 class _FieldTestPageState extends State<FieldTestPage> {
   final _branchLatCtrl = TextEditingController();
   final _branchLngCtrl = TextEditingController();
-  final _radiusCtrl = TextEditingController(text: '25');
+  final _checkInCtrl = TextEditingController(text: '25');
+  final _checkOutCtrl = TextEditingController(text: '35');
   final _graceCtrl = TextEditingController(text: '60');
   final _logScroll = ScrollController();
+  final _mapController = MapController();
 
   StreamSubscription<Position>? _posSub;
   Timer? _graceTicker;
@@ -53,9 +59,18 @@ class _FieldTestPageState extends State<FieldTestPage> {
   String _streamStatus = 'Start tracking to begin field test';
   final List<_LogEntry> _logs = [];
 
-  double get _radius {
-    final v = double.tryParse(_radiusCtrl.text.trim());
+  /// Enter / stay checked-in when distance <= this.
+  double get _checkInRadius {
+    final v = double.tryParse(_checkInCtrl.text.trim());
     return (v == null || v < 1) ? 25 : v;
+  }
+
+  /// Leave / start grace when distance > this (hysteresis band).
+  double get _checkOutRadius {
+    final v = double.tryParse(_checkOutCtrl.text.trim());
+    final out = (v == null || v < 1) ? 35.0 : v;
+    // Check-out must be >= check-in
+    return out < _checkInRadius ? _checkInRadius : out;
   }
 
   int get _graceSeconds {
@@ -67,15 +82,24 @@ class _FieldTestPageState extends State<FieldTestPage> {
   double? get _branchLng => double.tryParse(_branchLngCtrl.text.trim());
   bool get _hasBranch => _branchLat != null && _branchLng != null;
 
+  Color get _fenceColor => switch (_state) {
+        AttendanceState.inBranch => const Color(0xFF22A06B),
+        AttendanceState.gracePeriod => const Color(0xFFE09B1A),
+        AttendanceState.outside => const Color(0xFFE04A40),
+        AttendanceState.waiting => const Color(0xFF64748B),
+      };
+
   @override
   void dispose() {
     _posSub?.cancel();
     _graceTicker?.cancel();
     _branchLatCtrl.dispose();
     _branchLngCtrl.dispose();
-    _radiusCtrl.dispose();
+    _checkInCtrl.dispose();
+    _checkOutCtrl.dispose();
     _graceCtrl.dispose();
     _logScroll.dispose();
+    _mapController.dispose();
     super.dispose();
   }
 
@@ -145,6 +169,8 @@ class _FieldTestPageState extends State<FieldTestPage> {
         accuracy: pos.accuracy,
       );
 
+      _moveMapTo(pos.latitude, pos.longitude);
+
       if (_streaming) {
         _evaluate(pos);
       } else {
@@ -156,6 +182,35 @@ class _FieldTestPageState extends State<FieldTestPage> {
     } catch (e) {
       setState(() => _streamStatus = 'Could not set branch: $e');
       _addLog('Set branch failed: $e');
+    }
+  }
+
+  void _onMapTapSetBranch(LatLng latLng) {
+    setState(() {
+      _branchLatCtrl.text = latLng.latitude.toStringAsFixed(6);
+      _branchLngCtrl.text = latLng.longitude.toStringAsFixed(6);
+    });
+    _addLog(
+      'Branch set by map tap (${latLng.latitude.toStringAsFixed(5)}, ${latLng.longitude.toStringAsFixed(5)})',
+    );
+    if (_position != null) {
+      _evaluate(_position!);
+    }
+  }
+
+  void _moveMapTo(double lat, double lng, {double zoom = 17}) {
+    try {
+      _mapController.move(LatLng(lat, lng), zoom);
+    } catch (_) {
+      // Map may not be ready yet
+    }
+  }
+
+  void _recenterMap() {
+    if (_hasBranch) {
+      _moveMapTo(_branchLat!, _branchLng!);
+    } else if (_position != null) {
+      _moveMapTo(_position!.latitude, _position!.longitude);
     }
   }
 
@@ -217,7 +272,9 @@ class _FieldTestPageState extends State<FieldTestPage> {
     if (!_hasBranch) {
       setState(() {
         _distanceM = null;
-        _state = AttendanceState.waiting;
+        if (_state != AttendanceState.waiting) {
+          _state = AttendanceState.waiting;
+        }
       });
       _addLog(
         'GPS ping (set branch first)',
@@ -235,28 +292,46 @@ class _FieldTestPageState extends State<FieldTestPage> {
 
     setState(() => _distanceM = dist);
 
-    final inside = dist <= _radius;
+    final withinCheckIn = dist <= _checkInRadius;
+    final beyondCheckOut = dist > _checkOutRadius;
 
-    if (inside) {
+    if (withinCheckIn) {
+      // CHECK-IN: inside inner radius
       _graceTicker?.cancel();
       _graceTicker = null;
       _graceDeadline = null;
       _graceSecondsLeft = 0;
       if (_state == AttendanceState.gracePeriod) {
-        _addLog('Returned inside during grace', distance: dist, accuracy: pos.accuracy);
+        _addLog('Check-in (returned during grace)', distance: dist, accuracy: pos.accuracy);
       } else if (_state == AttendanceState.inBranch) {
-        _addLog('GPS ping (in branch)', distance: dist, accuracy: pos.accuracy);
+        _addLog('GPS ping (checked in)', distance: dist, accuracy: pos.accuracy);
+      } else {
+        _addLog('Check-in', distance: dist, accuracy: pos.accuracy);
       }
       _setState(AttendanceState.inBranch, distance: dist, accuracy: pos.accuracy);
-    } else {
+    } else if (_state == AttendanceState.inBranch && !beyondCheckOut) {
+      // Hysteresis band: between check-in and check-out — stay checked in
+      _addLog(
+        'GPS ping (hysteresis band)',
+        distance: dist,
+        accuracy: pos.accuracy,
+      );
+    } else if (beyondCheckOut || _state == AttendanceState.inBranch) {
+      // CHECK-OUT: crossed outer radius (or left without hysteresis)
       if (_state == AttendanceState.inBranch || _state == AttendanceState.waiting) {
+        _addLog('Check-out (left radius)', distance: dist, accuracy: pos.accuracy);
         _startGrace(dist, pos.accuracy);
       } else if (_state == AttendanceState.gracePeriod) {
         _refreshGraceCountdown();
         _addLog('GPS ping (still in grace)', distance: dist, accuracy: pos.accuracy);
       } else {
-        _addLog('GPS ping (outside)', distance: dist, accuracy: pos.accuracy);
+        _addLog('GPS ping (outside / checked out)', distance: dist, accuracy: pos.accuracy);
       }
+    } else if (_state == AttendanceState.gracePeriod) {
+      _refreshGraceCountdown();
+      _addLog('GPS ping (still in grace)', distance: dist, accuracy: pos.accuracy);
+    } else {
+      _addLog('GPS ping (outside check-in)', distance: dist, accuracy: pos.accuracy);
     }
   }
 
@@ -345,6 +420,22 @@ class _FieldTestPageState extends State<FieldTestPage> {
                     streaming: _streaming,
                   ),
                   const SizedBox(height: 12),
+                  _sectionTitle('Map'),
+                  const SizedBox(height: 8),
+                  GeofenceMapPanel(
+                    mapController: _mapController,
+                    fenceColor: _fenceColor,
+                    branchLat: _branchLat,
+                    branchLng: _branchLng,
+                    currentLat: _position?.latitude,
+                    currentLng: _position?.longitude,
+                    accuracyM: _position?.accuracy,
+                    checkInRadiusM: _checkInRadius,
+                    checkOutRadiusM: _checkOutRadius,
+                    onMapTap: _onMapTapSetBranch,
+                    onRecenter: _recenterMap,
+                  ),
+                  const SizedBox(height: 12),
                   _sectionTitle('Branch Setup'),
                   const SizedBox(height: 8),
                   Row(
@@ -369,20 +460,26 @@ class _FieldTestPageState extends State<FieldTestPage> {
                     children: [
                       Expanded(
                         child: _numField(
-                          controller: _radiusCtrl,
-                          label: 'Geofence Radius (m)',
+                          controller: _checkInCtrl,
+                          label: 'Check-in Radius (m)',
                           integer: true,
                         ),
                       ),
                       const SizedBox(width: 8),
                       Expanded(
                         child: _numField(
-                          controller: _graceCtrl,
-                          label: 'Grace Period (s)',
+                          controller: _checkOutCtrl,
+                          label: 'Check-out Radius (m)',
                           integer: true,
                         ),
                       ),
                     ],
+                  ),
+                  const SizedBox(height: 8),
+                  _numField(
+                    controller: _graceCtrl,
+                    label: 'Tea Stall Grace Period (s)',
+                    integer: true,
                   ),
                   const SizedBox(height: 10),
                   FilledButton.icon(
@@ -398,6 +495,8 @@ class _FieldTestPageState extends State<FieldTestPage> {
                     lng: _position?.longitude,
                     accuracy: _position?.accuracy,
                     distance: _distanceM,
+                    checkInRadius: _checkInRadius,
+                    checkOutRadius: _checkOutRadius,
                   ),
                   const SizedBox(height: 10),
                   OutlinedButton.icon(
@@ -644,15 +743,30 @@ class _MetricsGrid extends StatelessWidget {
     required this.lng,
     required this.accuracy,
     required this.distance,
+    required this.checkInRadius,
+    required this.checkOutRadius,
   });
 
   final double? lat;
   final double? lng;
   final double? accuracy;
   final double? distance;
+  final double checkInRadius;
+  final double checkOutRadius;
 
   @override
   Widget build(BuildContext context) {
+    String zone = '—';
+    if (distance != null) {
+      if (distance! <= checkInRadius) {
+        zone = 'INSIDE check-in';
+      } else if (distance! <= checkOutRadius) {
+        zone = 'Hysteresis band';
+      } else {
+        zone = 'OUTSIDE check-out';
+      }
+    }
+
     return GridView.count(
       crossAxisCount: 2,
       shrinkWrap: true,
@@ -671,6 +785,8 @@ class _MetricsGrid extends StatelessWidget {
           'Distance to Branch',
           distance != null ? '${distance!.toStringAsFixed(1)} m' : '—',
         ),
+        _metric('Check-in / Out', '${checkInRadius.round()} / ${checkOutRadius.round()} m'),
+        _metric('Zone', zone),
       ],
     );
   }
