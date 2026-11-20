@@ -41,8 +41,8 @@ class GeofenceMapPanel extends StatelessWidget {
     final center = _hasBranch
         ? LatLng(branchLat!, branchLng!)
         : _hasCurrent
-            ? LatLng(currentLat!, currentLng!)
-            : const LatLng(10.0159, 76.3419);
+        ? LatLng(currentLat!, currentLng!)
+        : const LatLng(10.0159, 76.3419);
 
     final circles = <CircleMarker>[];
     final markers = <Marker>[];
@@ -110,10 +110,15 @@ class GeofenceMapPanel extends StatelessWidget {
       );
     }
 
+    final mapHeight = (MediaQuery.sizeOf(context).height * 0.55).clamp(
+      360.0,
+      640.0,
+    );
+
     return ClipRRect(
       borderRadius: BorderRadius.circular(16),
       child: SizedBox(
-        height: 280,
+        height: mapHeight,
         child: Stack(
           children: [
             FlutterMap(
@@ -144,7 +149,10 @@ class GeofenceMapPanel extends StatelessWidget {
               right: 8,
               child: IgnorePointer(
                 child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 10,
+                    vertical: 6,
+                  ),
                   decoration: BoxDecoration(
                     color: Colors.white.withValues(alpha: 0.92),
                     borderRadius: BorderRadius.circular(8),
@@ -203,11 +211,11 @@ class GeofenceMapPanel extends StatelessWidget {
   }
 
   Widget _legendDot(Color c) => Container(
-        width: 8,
-        height: 8,
-        margin: const EdgeInsets.only(right: 2),
-        decoration: BoxDecoration(color: c, shape: BoxShape.circle),
-      );
+    width: 8,
+    height: 8,
+    margin: const EdgeInsets.only(right: 2),
+    decoration: BoxDecoration(color: c, shape: BoxShape.circle),
+  );
 }
 
 class _Pin extends StatelessWidget {
@@ -240,10 +248,7 @@ class _Pin extends StatelessWidget {
             ),
           ),
         ),
-        CustomPaint(
-          size: const Size(10, 8),
-          painter: _TrianglePainter(color),
-        ),
+        CustomPaint(size: const Size(10, 8), painter: _TrianglePainter(color)),
       ],
     );
   }

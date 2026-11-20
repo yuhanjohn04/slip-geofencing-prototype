@@ -56,8 +56,23 @@ class _FieldTestPageState extends State<FieldTestPage> {
   DateTime? _graceDeadline;
   int _graceSecondsLeft = 0;
   bool _streaming = false;
+  bool _calibrating = false;
   String _streamStatus = 'Start tracking to begin field test';
   final List<_LogEntry> _logs = [];
+
+  /// Prefer fixes better than this (meters) when calibrating.
+  static const double _goodAccuracyM = 15;
+
+  /// Soft reject for geofence decisions when worse than this.
+  static const double _usableAccuracyM = 35;
+
+  AndroidSettings get _preciseSettings => AndroidSettings(
+    accuracy: LocationAccuracy.bestForNavigation,
+    distanceFilter: 0,
+    intervalDuration: const Duration(seconds: 1),
+    // Fused provider + GPS; better outdoor lock on Realme/OPPO.
+    forceLocationManager: false,
+  );
 
   /// Enter / stay checked-in when distance <= this.
   double get _checkInRadius {
@@ -83,11 +98,11 @@ class _FieldTestPageState extends State<FieldTestPage> {
   bool get _hasBranch => _branchLat != null && _branchLng != null;
 
   Color get _fenceColor => switch (_state) {
-        AttendanceState.inBranch => const Color(0xFF22A06B),
-        AttendanceState.gracePeriod => const Color(0xFFE09B1A),
-        AttendanceState.outside => const Color(0xFFE04A40),
-        AttendanceState.waiting => const Color(0xFF64748B),
-      };
+    AttendanceState.inBranch => const Color(0xFF22A06B),
+    AttendanceState.gracePeriod => const Color(0xFFE09B1A),
+    AttendanceState.outside => const Color(0xFFE04A40),
+    AttendanceState.waiting => const Color(0xFF64748B),
+  };
 
   @override
   void dispose() {
@@ -121,8 +136,9 @@ class _FieldTestPageState extends State<FieldTestPage> {
   Future<bool> _ensurePermission() async {
     final enabled = await Geolocator.isLocationServiceEnabled();
     if (!enabled) {
-      setState(() => _streamStatus = 'Location services are disabled');
-      _addLog('Location services disabled');
+      setState(() => _streamStatus = 'Location/GPS is off — turn it on');
+      _addLog('Location services disabled — opening settings');
+      await Geolocator.openLocationSettings();
       return false;
     }
 
@@ -137,12 +153,100 @@ class _FieldTestPageState extends State<FieldTestPage> {
     }
 
     if (permission == LocationPermission.deniedForever) {
-      setState(() => _streamStatus = 'Permission permanently denied — enable in Settings');
+      setState(
+        () => _streamStatus =
+            'Permission permanently denied — enable in Settings',
+      );
       _addLog('Permission permanently denied');
       return false;
     }
 
+    // Android 12+: Precise location must be on for useful GPS.
+    try {
+      final accuracy = await Geolocator.getLocationAccuracy();
+      if (accuracy == LocationAccuracyStatus.reduced) {
+        setState(
+          () => _streamStatus =
+              'Precise location is off — enable Precise for this app',
+        );
+        _addLog('Precise location reduced — open app permission settings');
+        await Geolocator.openAppSettings();
+        return false;
+      }
+    } catch (_) {
+      // Some devices don't report accuracy status.
+    }
+
     return true;
+  }
+
+  /// Wait outdoors for a stable GPS lock; pick the best sample.
+  Future<Position?> _calibrateGps({
+    Duration timeout = const Duration(seconds: 25),
+  }) async {
+    setState(() {
+      _calibrating = true;
+      _streamStatus = 'Calibrating GPS… stand still outdoors';
+    });
+    _addLog('GPS calibration started');
+
+    Position? best;
+    StreamSubscription<Position>? sub;
+    final done = Completer<Position?>();
+
+    final timeoutTimer = Timer(timeout, () {
+      if (!done.isCompleted) done.complete(best);
+    });
+
+    try {
+      try {
+        best = await Geolocator.getCurrentPosition(
+          locationSettings: _preciseSettings,
+        );
+        setState(() {
+          _position = best;
+          _streamStatus =
+              'Calibrating… ±${best!.accuracy.round()} m (stand still)';
+        });
+        _moveMapTo(best.latitude, best.longitude);
+        if (best.accuracy <= _goodAccuracyM) {
+          timeoutTimer.cancel();
+          return best;
+        }
+      } catch (_) {}
+
+      sub = Geolocator.getPositionStream(locationSettings: _preciseSettings)
+          .listen((pos) {
+            if (best == null || pos.accuracy < best!.accuracy) {
+              best = pos;
+            }
+            setState(() {
+              _position = pos;
+              _streamStatus = 'Calibrating… best ±${best!.accuracy.round()} m';
+            });
+            _moveMapTo(pos.latitude, pos.longitude);
+
+            if (pos.accuracy <= _goodAccuracyM && !done.isCompleted) {
+              timeoutTimer.cancel();
+              done.complete(best);
+            }
+          });
+
+      final result = await done.future;
+      if (result != null) {
+        _addLog(
+          result.accuracy <= _goodAccuracyM
+              ? 'GPS calibrated (good lock)'
+              : 'GPS calibrated (best available — still noisy)',
+          accuracy: result.accuracy,
+        );
+      }
+      return result;
+    } finally {
+      timeoutTimer.cancel();
+      await sub?.cancel();
+      if (mounted) setState(() => _calibrating = false);
+    }
   }
 
   Future<void> _setCurrentAsBranch() async {
@@ -150,18 +254,19 @@ class _FieldTestPageState extends State<FieldTestPage> {
       final ok = await _ensurePermission();
       if (!ok) return;
 
-      final pos = _position ??
-          await Geolocator.getCurrentPosition(
-            locationSettings: AndroidSettings(
-              accuracy: LocationAccuracy.high,
-              timeLimit: const Duration(seconds: 20),
-            ),
-          );
+      final pos = await _calibrateGps();
+      if (pos == null) {
+        setState(() => _streamStatus = 'Could not get GPS fix');
+        return;
+      }
 
       setState(() {
         _branchLatCtrl.text = pos.latitude.toStringAsFixed(6);
         _branchLngCtrl.text = pos.longitude.toStringAsFixed(6);
         _position = pos;
+        _streamStatus = pos.accuracy <= _goodAccuracyM
+            ? 'Branch set (±${pos.accuracy.round()} m)'
+            : 'Branch set with weak GPS (±${pos.accuracy.round()} m) — retake outdoors';
       });
       _addLog(
         'Branch set to current spot',
@@ -176,7 +281,11 @@ class _FieldTestPageState extends State<FieldTestPage> {
       } else {
         setState(() {
           _distanceM = 0;
-          _setState(AttendanceState.inBranch, distance: 0, accuracy: pos.accuracy);
+          _setState(
+            AttendanceState.inBranch,
+            distance: 0,
+            accuracy: pos.accuracy,
+          );
         });
       }
     } catch (e) {
@@ -226,26 +335,30 @@ class _FieldTestPageState extends State<FieldTestPage> {
     final ok = await _ensurePermission();
     if (!ok) return;
 
+    // Warm GPS before live decisions.
+    final calibrated = await _calibrateGps();
+    if (calibrated != null) {
+      setState(() => _position = calibrated);
+      _evaluate(calibrated);
+    }
+
     await _posSub?.cancel();
-    _posSub = Geolocator.getPositionStream(
-      locationSettings: AndroidSettings(
-        accuracy: LocationAccuracy.high,
-        distanceFilter: 2,
-        intervalDuration: const Duration(seconds: 3),
-      ),
-    ).listen(
-      _onPosition,
-      onError: (Object e) {
-        setState(() => _streamStatus = 'GPS stream error: $e');
-        _addLog('GPS error: $e');
-      },
-    );
+    _posSub = Geolocator.getPositionStream(locationSettings: _preciseSettings)
+        .listen(
+          _onPosition,
+          onError: (Object e) {
+            setState(() => _streamStatus = 'GPS stream error: $e');
+            _addLog('GPS error: $e');
+          },
+        );
 
     setState(() {
       _streaming = true;
-      _streamStatus = 'Live tracking…';
+      _streamStatus = calibrated == null
+          ? 'Live tracking… (weak lock)'
+          : 'Live tracking… ±${calibrated.accuracy.round()} m';
     });
-    _addLog('GPS stream started');
+    _addLog('GPS stream started', accuracy: calibrated?.accuracy);
   }
 
   Future<void> _stopStream() async {
@@ -261,10 +374,18 @@ class _FieldTestPageState extends State<FieldTestPage> {
   }
 
   void _onPosition(Position pos) {
+    final poor = pos.accuracy > _usableAccuracyM;
     setState(() {
       _position = pos;
-      _streamStatus = 'Live tracking…';
+      _streamStatus = poor
+          ? 'Weak GPS ±${pos.accuracy.round()} m — move outdoors / wait'
+          : 'Live tracking… ±${pos.accuracy.round()} m';
     });
+    // Still show on map, but skip geofence flips on very noisy fixes.
+    if (poor) {
+      _addLog('GPS ping ignored (noisy)', accuracy: pos.accuracy);
+      return;
+    }
     _evaluate(pos);
   }
 
@@ -276,10 +397,7 @@ class _FieldTestPageState extends State<FieldTestPage> {
           _state = AttendanceState.waiting;
         }
       });
-      _addLog(
-        'GPS ping (set branch first)',
-        accuracy: pos.accuracy,
-      );
+      _addLog('GPS ping (set branch first)', accuracy: pos.accuracy);
       return;
     }
 
@@ -302,13 +420,25 @@ class _FieldTestPageState extends State<FieldTestPage> {
       _graceDeadline = null;
       _graceSecondsLeft = 0;
       if (_state == AttendanceState.gracePeriod) {
-        _addLog('Check-in (returned during grace)', distance: dist, accuracy: pos.accuracy);
+        _addLog(
+          'Check-in (returned during grace)',
+          distance: dist,
+          accuracy: pos.accuracy,
+        );
       } else if (_state == AttendanceState.inBranch) {
-        _addLog('GPS ping (checked in)', distance: dist, accuracy: pos.accuracy);
+        _addLog(
+          'GPS ping (checked in)',
+          distance: dist,
+          accuracy: pos.accuracy,
+        );
       } else {
         _addLog('Check-in', distance: dist, accuracy: pos.accuracy);
       }
-      _setState(AttendanceState.inBranch, distance: dist, accuracy: pos.accuracy);
+      _setState(
+        AttendanceState.inBranch,
+        distance: dist,
+        accuracy: pos.accuracy,
+      );
     } else if (_state == AttendanceState.inBranch && !beyondCheckOut) {
       // Hysteresis band: between check-in and check-out — stay checked in
       _addLog(
@@ -318,20 +448,41 @@ class _FieldTestPageState extends State<FieldTestPage> {
       );
     } else if (beyondCheckOut || _state == AttendanceState.inBranch) {
       // CHECK-OUT: crossed outer radius (or left without hysteresis)
-      if (_state == AttendanceState.inBranch || _state == AttendanceState.waiting) {
-        _addLog('Check-out (left radius)', distance: dist, accuracy: pos.accuracy);
+      if (_state == AttendanceState.inBranch ||
+          _state == AttendanceState.waiting) {
+        _addLog(
+          'Check-out (left radius)',
+          distance: dist,
+          accuracy: pos.accuracy,
+        );
         _startGrace(dist, pos.accuracy);
       } else if (_state == AttendanceState.gracePeriod) {
         _refreshGraceCountdown();
-        _addLog('GPS ping (still in grace)', distance: dist, accuracy: pos.accuracy);
+        _addLog(
+          'GPS ping (still in grace)',
+          distance: dist,
+          accuracy: pos.accuracy,
+        );
       } else {
-        _addLog('GPS ping (outside / checked out)', distance: dist, accuracy: pos.accuracy);
+        _addLog(
+          'GPS ping (outside / checked out)',
+          distance: dist,
+          accuracy: pos.accuracy,
+        );
       }
     } else if (_state == AttendanceState.gracePeriod) {
       _refreshGraceCountdown();
-      _addLog('GPS ping (still in grace)', distance: dist, accuracy: pos.accuracy);
+      _addLog(
+        'GPS ping (still in grace)',
+        distance: dist,
+        accuracy: pos.accuracy,
+      );
     } else {
-      _addLog('GPS ping (outside check-in)', distance: dist, accuracy: pos.accuracy);
+      _addLog(
+        'GPS ping (outside check-in)',
+        distance: dist,
+        accuracy: pos.accuracy,
+      );
     }
   }
 
@@ -340,12 +491,17 @@ class _FieldTestPageState extends State<FieldTestPage> {
     _graceDeadline = DateTime.now().add(Duration(seconds: secs));
     _graceSecondsLeft = secs;
     _setState(AttendanceState.gracePeriod, distance: dist, accuracy: accuracy);
-    _addLog('Grace period started (${secs}s)', distance: dist, accuracy: accuracy);
+    _addLog(
+      'Grace period started (${secs}s)',
+      distance: dist,
+      accuracy: accuracy,
+    );
 
     _graceTicker?.cancel();
     _graceTicker = Timer.periodic(const Duration(milliseconds: 200), (_) {
       if (_graceDeadline == null) return;
-      final left = _graceDeadline!.difference(DateTime.now()).inMilliseconds / 1000.0;
+      final left =
+          _graceDeadline!.difference(DateTime.now()).inMilliseconds / 1000.0;
       if (left <= 0) {
         _graceTicker?.cancel();
         _graceTicker = null;
@@ -369,7 +525,8 @@ class _FieldTestPageState extends State<FieldTestPage> {
 
   void _refreshGraceCountdown() {
     if (_graceDeadline == null) return;
-    final left = _graceDeadline!.difference(DateTime.now()).inMilliseconds / 1000.0;
+    final left =
+        _graceDeadline!.difference(DateTime.now()).inMilliseconds / 1000.0;
     setState(() => _graceSecondsLeft = left < 0 ? 0 : left.ceil());
   }
 
@@ -385,11 +542,11 @@ class _FieldTestPageState extends State<FieldTestPage> {
   }
 
   String _label(AttendanceState s) => switch (s) {
-        AttendanceState.waiting => 'WAITING',
-        AttendanceState.inBranch => 'IN_BRANCH',
-        AttendanceState.gracePeriod => 'GRACE_PERIOD',
-        AttendanceState.outside => 'OUTSIDE',
-      };
+    AttendanceState.waiting => 'WAITING',
+    AttendanceState.inBranch => 'IN_BRANCH',
+    AttendanceState.gracePeriod => 'GRACE_PERIOD',
+    AttendanceState.outside => 'OUTSIDE',
+  };
 
   void _clearLogs() => setState(() => _logs.clear());
 
@@ -483,9 +640,15 @@ class _FieldTestPageState extends State<FieldTestPage> {
                   ),
                   const SizedBox(height: 10),
                   FilledButton.icon(
-                    onPressed: _setCurrentAsBranch,
-                    icon: const Icon(Icons.my_location),
-                    label: const Text('Set Current Spot as Branch'),
+                    onPressed: _calibrating ? null : _setCurrentAsBranch,
+                    icon: Icon(
+                      _calibrating ? Icons.hourglass_top : Icons.my_location,
+                    ),
+                    label: Text(
+                      _calibrating
+                          ? 'Calibrating GPS…'
+                          : 'Calibrate & Set Branch Here',
+                    ),
                   ),
                   const SizedBox(height: 16),
                   _sectionTitle('Live GPS'),
@@ -502,7 +665,9 @@ class _FieldTestPageState extends State<FieldTestPage> {
                   OutlinedButton.icon(
                     onPressed: _toggleStream,
                     icon: Icon(_streaming ? Icons.stop : Icons.play_arrow),
-                    label: Text(_streaming ? 'Stop Live Tracking' : 'Start Live Tracking'),
+                    label: Text(
+                      _streaming ? 'Stop Live Tracking' : 'Start Live Tracking',
+                    ),
                   ),
                   const SizedBox(height: 16),
                   Row(
@@ -591,7 +756,10 @@ class _FieldTestPageState extends State<FieldTestPage> {
   }) {
     return TextField(
       controller: controller,
-      keyboardType: TextInputType.numberWithOptions(decimal: !integer, signed: true),
+      keyboardType: TextInputType.numberWithOptions(
+        decimal: !integer,
+        signed: true,
+      ),
       decoration: InputDecoration(
         labelText: label,
         border: const OutlineInputBorder(),
@@ -640,25 +808,25 @@ class _StatusBanner extends StatelessWidget {
   Widget build(BuildContext context) {
     final (Color bg, Color fg, String label) = switch (state) {
       AttendanceState.waiting => (
-          const Color(0xFFE8ECEA),
-          const Color(0xFF5A6B66),
-          'WAITING',
-        ),
+        const Color(0xFFE8ECEA),
+        const Color(0xFF5A6B66),
+        'WAITING',
+      ),
       AttendanceState.inBranch => (
-          const Color(0xFFD8F5E7),
-          const Color(0xFF1A8055),
-          'IN BRANCH',
-        ),
+        const Color(0xFFD8F5E7),
+        const Color(0xFF1A8055),
+        'IN BRANCH',
+      ),
       AttendanceState.gracePeriod => (
-          const Color(0xFFFFF0D1),
-          const Color(0xFFC4840F),
-          'TEA STALL / GRACE PERIOD',
-        ),
+        const Color(0xFFFFF0D1),
+        const Color(0xFFC4840F),
+        'TEA STALL / GRACE PERIOD',
+      ),
       AttendanceState.outside => (
-          const Color(0xFFFDE2DF),
-          const Color(0xFFC0392B),
-          'OUTSIDE / IN TRANSIT',
-        ),
+        const Color(0xFFFDE2DF),
+        const Color(0xFFC0392B),
+        'OUTSIDE / IN TRANSIT',
+      ),
     };
 
     return Container(
@@ -785,7 +953,10 @@ class _MetricsGrid extends StatelessWidget {
           'Distance to Branch',
           distance != null ? '${distance!.toStringAsFixed(1)} m' : '—',
         ),
-        _metric('Check-in / Out', '${checkInRadius.round()} / ${checkOutRadius.round()} m'),
+        _metric(
+          'Check-in / Out',
+          '${checkInRadius.round()} / ${checkOutRadius.round()} m',
+        ),
         _metric('Zone', zone),
       ],
     );
