@@ -1,0 +1,972 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Geofencing Test Lab</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: {
+            sans: ['"DM Sans"', 'system-ui', 'sans-serif'],
+            mono: ['"IBM Plex Mono"', 'ui-monospace', 'monospace'],
+          },
+          colors: {
+            ink: { 50: '#f4f6f5', 100: '#e4e9e7', 200: '#c5d0cc', 700: '#2a3a36', 800: '#1a2824', 900: '#0f1916' },
+            leaf: { 400: '#3ecf8e', 500: '#22a06b', 600: '#1a8055' },
+            amber: { 400: '#f5b942', 500: '#e09b1a' },
+            coral: { 400: '#f07167', 500: '#e04a40' },
+          },
+        },
+      },
+    };
+  </script>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+    integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
+  <style>
+    body {
+      background:
+        radial-gradient(ellipse 80% 50% at 10% -10%, rgba(34, 160, 107, 0.12), transparent),
+        radial-gradient(ellipse 60% 40% at 100% 0%, rgba(224, 155, 26, 0.08), transparent),
+        #f4f6f5;
+    }
+    .log-scroll { scrollbar-width: thin; scrollbar-color: #c5d0cc transparent; }
+    .log-scroll::-webkit-scrollbar { width: 6px; }
+    .log-scroll::-webkit-scrollbar-thumb { background: #c5d0cc; border-radius: 3px; }
+    .toggle-track { transition: background-color 0.2s ease; }
+    .toggle-knob { transition: transform 0.2s ease; }
+    .badge-pulse { animation: badgePulse 2s ease-in-out infinite; }
+    @keyframes badgePulse {
+      0%, 100% { box-shadow: 0 0 0 0 currentColor; }
+      50% { box-shadow: 0 0 0 8px transparent; }
+    }
+    #map {
+      height: 350px;
+      width: 100%;
+      z-index: 0;
+    }
+    .leaflet-container { font-family: inherit; background: #e4e9e7; }
+    .map-pin {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 28px;
+      height: 28px;
+      border-radius: 50% 50% 50% 0;
+      transform: rotate(-45deg);
+      border: 2px solid #fff;
+      box-shadow: 0 2px 8px rgba(15, 25, 22, 0.35);
+    }
+    .map-pin span {
+      transform: rotate(45deg);
+      font-size: 11px;
+      font-weight: 700;
+      color: #fff;
+      line-height: 1;
+    }
+    .map-pin-branch { background: #1a2824; }
+    .map-pin-staff { background: #2563eb; cursor: grab; }
+    .map-pin-staff:active { cursor: grabbing; }
+    .leaflet-div-icon { background: transparent; border: none; }
+  </style>
+</head>
+<body class="font-sans text-ink-800 antialiased min-h-screen">
+  <div class="max-w-3xl mx-auto px-4 py-6 sm:py-10 space-y-5">
+
+    <!-- Header -->
+    <header class="space-y-1">
+      <p class="text-xs font-medium uppercase tracking-widest text-leaf-600">Attendance Geofence</p>
+      <h1 class="text-2xl sm:text-3xl font-bold tracking-tight text-ink-900">Branch Test Lab</h1>
+      <p class="text-sm text-ink-700/70">Live GPS · Haversine distance · Tea-stall grace period</p>
+    </header>
+
+    <!-- Status Badge -->
+    <section id="statusBadge" class="rounded-2xl border border-ink-200 bg-white px-5 py-6 sm:px-8 sm:py-8 text-center transition-colors duration-300">
+      <p class="text-xs font-medium uppercase tracking-widest text-ink-700/50 mb-3">Attendance State</p>
+      <div id="statusLabel" class="inline-flex items-center gap-2 rounded-full px-5 py-2.5 text-sm sm:text-base font-semibold badge-pulse text-leaf-600 bg-leaf-400/15">
+        <span id="statusDot" class="h-2.5 w-2.5 rounded-full bg-current"></span>
+        <span id="statusText">WAITING FOR GPS…</span>
+      </div>
+      <p id="graceCountdown" class="mt-3 font-mono text-2xl sm:text-3xl font-medium text-amber-500 tabular-nums hidden">
+        <span id="graceSeconds">15</span><span class="text-base text-ink-700/40 ml-1">s remaining</span>
+      </p>
+    </section>
+
+    <!-- Live Map -->
+    <section class="rounded-2xl border border-ink-200 bg-white overflow-hidden shadow-sm">
+      <div class="relative">
+        <div id="map" class="rounded-t-2xl"></div>
+        <div class="absolute top-3 right-3 z-[1000] flex flex-col gap-2 items-end">
+          <div class="inline-flex rounded-lg overflow-hidden border border-ink-200 bg-white/95 shadow-sm text-xs font-medium">
+            <button id="layerStreetBtn" type="button" class="px-3 py-1.5 bg-ink-800 text-white transition-colors">Street</button>
+            <button id="layerSatBtn" type="button" class="px-3 py-1.5 text-ink-700 hover:bg-ink-50 transition-colors">Satellite</button>
+          </div>
+          <button id="followGpsBtn" type="button"
+            class="hidden rounded-lg border border-ink-200 bg-white/95 shadow-sm px-3 py-1.5 text-xs font-medium text-ink-800 hover:bg-ink-50">
+            Follow GPS
+          </button>
+        </div>
+        <p class="absolute bottom-3 left-3 right-3 z-[1000] pointer-events-none text-[10px] sm:text-xs text-ink-800/80 bg-white/85 backdrop-blur-sm rounded-lg px-2.5 py-1.5 shadow-sm">
+          Click map = set branch · Drag blue pin = walk to tea stall
+        </p>
+      </div>
+      <div class="flex items-center gap-4 px-4 py-2.5 border-t border-ink-100 text-[11px] text-ink-700/60">
+        <span class="inline-flex items-center gap-1.5"><span class="h-2.5 w-2.5 rounded-full bg-ink-800"></span> Branch</span>
+        <span class="inline-flex items-center gap-1.5"><span class="h-2.5 w-2.5 rounded-full bg-blue-600"></span> Staff (drag me)</span>
+        <span class="inline-flex items-center gap-1.5"><span class="h-2.5 w-2.5 rounded-full bg-leaf-500/40 ring-1 ring-leaf-500"></span> Geofence</span>
+      </div>
+    </section>
+
+    <!-- Branch Setup -->
+    <section class="rounded-2xl border border-ink-200 bg-white p-5 sm:p-6 space-y-4">
+      <h2 class="text-sm font-semibold uppercase tracking-wider text-ink-700/60">Branch Setup</h2>
+
+      <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+        <label class="block space-y-1.5">
+          <span class="text-xs font-medium text-ink-700/70">Branch Latitude</span>
+          <input id="branchLat" type="number" step="any" placeholder="e.g. 12.9716"
+            class="w-full rounded-lg border border-ink-200 bg-ink-50 px-3 py-2.5 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-leaf-500/40 focus:border-leaf-500" />
+        </label>
+        <label class="block space-y-1.5">
+          <span class="text-xs font-medium text-ink-700/70">Branch Longitude</span>
+          <input id="branchLng" type="number" step="any" placeholder="e.g. 77.5946"
+            class="w-full rounded-lg border border-ink-200 bg-ink-50 px-3 py-2.5 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-leaf-500/40 focus:border-leaf-500" />
+        </label>
+        <label class="block space-y-1.5">
+          <span class="text-xs font-medium text-ink-700/70">Geofence Radius (m)</span>
+          <input id="geofenceRadius" type="number" min="1" step="1" value="30"
+            class="w-full rounded-lg border border-ink-200 bg-ink-50 px-3 py-2.5 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-leaf-500/40 focus:border-leaf-500" />
+        </label>
+      </div>
+
+      <div class="flex flex-col gap-3">
+        <label class="block space-y-1.5">
+          <span class="text-xs font-medium text-ink-700/70">Tea Stall Grace Period (seconds)</span>
+          <input id="gracePeriod" type="number" min="1" step="1" value="15"
+            class="w-full rounded-lg border border-ink-200 bg-ink-50 px-3 py-2.5 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-leaf-500/40 focus:border-leaf-500" />
+        </label>
+        <div class="flex flex-col sm:flex-row gap-2">
+          <button id="useCurrentBtn" type="button"
+            class="rounded-lg bg-ink-800 hover:bg-ink-900 text-white text-sm font-medium px-4 py-2.5 transition-colors whitespace-nowrap">
+            Use My Current Location as Branch
+          </button>
+          <button id="sampleLocBtn" type="button"
+            class="rounded-lg border border-ink-200 bg-white hover:bg-ink-50 text-ink-800 text-sm font-medium px-4 py-2.5 transition-colors whitespace-nowrap">
+            Load Sample Location
+          </button>
+        </div>
+      </div>
+    </section>
+
+    <!-- Live Metrics -->
+    <section class="rounded-2xl border border-ink-200 bg-white p-5 sm:p-6 space-y-4">
+      <div class="flex items-center justify-between gap-3">
+        <h2 class="text-sm font-semibold uppercase tracking-wider text-ink-700/60">Live Geolocation</h2>
+        <span id="gpsStatus" class="text-xs font-medium text-ink-700/40">Starting…</span>
+      </div>
+
+      <div class="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        <div class="rounded-xl bg-ink-50 px-3 py-3 space-y-1">
+          <p class="text-[10px] uppercase tracking-wider text-ink-700/50 font-medium">Current Lat</p>
+          <p id="currentLat" class="font-mono text-sm font-medium truncate">—</p>
+        </div>
+        <div class="rounded-xl bg-ink-50 px-3 py-3 space-y-1">
+          <p class="text-[10px] uppercase tracking-wider text-ink-700/50 font-medium">Current Lng</p>
+          <p id="currentLng" class="font-mono text-sm font-medium truncate">—</p>
+        </div>
+        <div class="rounded-xl bg-ink-50 px-3 py-3 space-y-1">
+          <p class="text-[10px] uppercase tracking-wider text-ink-700/50 font-medium">GPS Accuracy</p>
+          <p id="gpsAccuracy" class="font-mono text-sm font-medium">—</p>
+        </div>
+        <div class="rounded-xl bg-ink-50 px-3 py-3 space-y-1">
+          <p class="text-[10px] uppercase tracking-wider text-ink-700/50 font-medium">Distance</p>
+          <p id="distance" class="font-mono text-sm font-medium">—</p>
+        </div>
+      </div>
+
+      <p class="text-xs text-ink-700/50">
+        Last ping: <span id="lastPing" class="font-mono text-ink-700">—</span>
+      </p>
+
+      <!-- Mock toggle -->
+      <div class="flex items-center justify-between gap-4 rounded-xl border border-ink-100 bg-ink-50/80 px-4 py-3">
+        <div>
+          <p class="text-sm font-medium text-ink-800">Simulate Walking Away (Mock Outside)</p>
+          <p class="text-xs text-ink-700/50 mt-0.5">Forces distance beyond the geofence for desk testing</p>
+        </div>
+        <button id="mockToggle" type="button" role="switch" aria-checked="false"
+          class="toggle-track relative h-7 w-12 shrink-0 rounded-full bg-ink-200 focus:outline-none focus:ring-2 focus:ring-leaf-500/40">
+          <span class="toggle-knob absolute top-0.5 left-0.5 h-6 w-6 rounded-full bg-white shadow"></span>
+        </button>
+      </div>
+    </section>
+
+    <!-- Activity Log -->
+    <section class="rounded-2xl border border-ink-200 bg-white p-5 sm:p-6 space-y-3">
+      <div class="flex items-center justify-between gap-3">
+        <h2 class="text-sm font-semibold uppercase tracking-wider text-ink-700/60">Live Activity Log</h2>
+        <button id="clearLogsBtn" type="button"
+          class="text-xs font-medium text-ink-700/60 hover:text-coral-500 transition-colors">
+          Clear Logs
+        </button>
+      </div>
+      <div class="log-scroll max-h-64 overflow-y-auto rounded-xl border border-ink-100">
+        <table class="w-full text-left text-xs">
+          <thead class="sticky top-0 bg-ink-50 text-ink-700/50 uppercase tracking-wider">
+            <tr>
+              <th class="px-3 py-2 font-medium">Time</th>
+              <th class="px-3 py-2 font-medium">Event</th>
+              <th class="px-3 py-2 font-medium hidden sm:table-cell">Dist</th>
+              <th class="px-3 py-2 font-medium hidden sm:table-cell">Acc</th>
+            </tr>
+          </thead>
+          <tbody id="logBody" class="font-mono divide-y divide-ink-100">
+            <tr>
+              <td colspan="4" class="px-3 py-6 text-center text-ink-700/40 font-sans">No events yet</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <p class="text-center text-[11px] text-ink-700/40 pb-4">
+      Geolocation needs a secure context (HTTPS or localhost). On phone, serve over HTTPS or use a tunnel.
+    </p>
+  </div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+    integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+  <script>
+    (function () {
+      'use strict';
+
+      // ——— DOM refs ———
+      const $ = (id) => document.getElementById(id);
+      const els = {
+        branchLat: $('branchLat'),
+        branchLng: $('branchLng'),
+        geofenceRadius: $('geofenceRadius'),
+        gracePeriod: $('gracePeriod'),
+        useCurrentBtn: $('useCurrentBtn'),
+        sampleLocBtn: $('sampleLocBtn'),
+        statusBadge: $('statusBadge'),
+        statusLabel: $('statusLabel'),
+        statusText: $('statusText'),
+        graceCountdown: $('graceCountdown'),
+        graceSeconds: $('graceSeconds'),
+        currentLat: $('currentLat'),
+        currentLng: $('currentLng'),
+        gpsAccuracy: $('gpsAccuracy'),
+        distance: $('distance'),
+        lastPing: $('lastPing'),
+        gpsStatus: $('gpsStatus'),
+        mockToggle: $('mockToggle'),
+        logBody: $('logBody'),
+        clearLogsBtn: $('clearLogsBtn'),
+        layerStreetBtn: $('layerStreetBtn'),
+        layerSatBtn: $('layerSatBtn'),
+        followGpsBtn: $('followGpsBtn'),
+      };
+
+      // ——— State ———
+      const STATES = {
+        WAITING: 'WAITING',
+        IN_BRANCH: 'IN_BRANCH',
+        TEA_STALL: 'TEA_STALL',
+        OUTSIDE: 'OUTSIDE',
+      };
+
+      let state = STATES.WAITING;
+      let mockOutside = false;
+      let watchId = null;
+      let lastPosition = null;
+      let liveGpsPosition = null; // last real GPS fix (even while staff is manually dragged)
+      let followGps = true;
+      let graceDeadline = null;
+      let graceTimerId = null;
+      let logEmpty = true;
+      let mapReady = false;
+      let suppressMapClick = false;
+
+      const GEO_OPTS = {
+        enableHighAccuracy: false,
+        timeout: 20000,
+        maximumAge: 30000,
+      };
+
+      const SAMPLE_LAT = 10.0159;
+      const SAMPLE_LNG = 76.3419;
+
+      const FENCE_COLORS = {
+        [STATES.WAITING]: { color: '#64748b', fill: '#94a3b8' },
+        [STATES.IN_BRANCH]: { color: '#1a8055', fill: '#22a06b' },
+        [STATES.TEA_STALL]: { color: '#c4840f', fill: '#e09b1a' },
+        [STATES.OUTSIDE]: { color: '#c0392b', fill: '#e04a40' },
+      };
+
+      // ——— Haversine (meters) ———
+      function haversineMeters(lat1, lon1, lat2, lon2) {
+        const R = 6371000;
+        const toRad = (d) => (d * Math.PI) / 180;
+        const dLat = toRad(lat2 - lat1);
+        const dLon = toRad(lon2 - lon1);
+        const a =
+          Math.sin(dLat / 2) ** 2 +
+          Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+        return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+      }
+
+      function getBranchCoords() {
+        const lat = parseFloat(els.branchLat.value);
+        const lng = parseFloat(els.branchLng.value);
+        if (Number.isNaN(lat) || Number.isNaN(lng)) return null;
+        return { lat, lng };
+      }
+
+      function getRadius() {
+        const r = parseFloat(els.geofenceRadius.value);
+        return Number.isNaN(r) || r < 1 ? 30 : r;
+      }
+
+      function getGraceSeconds() {
+        const s = parseInt(els.gracePeriod.value, 10);
+        return Number.isNaN(s) || s < 1 ? 15 : s;
+      }
+
+      function nowStamp() {
+        return new Date().toLocaleTimeString('en-GB', { hour12: false }) +
+          '.' + String(new Date().getMilliseconds()).padStart(3, '0');
+      }
+
+      function getStaffCoords() {
+        if (!lastPosition) return null;
+        return {
+          lat: lastPosition.coords.latitude,
+          lng: lastPosition.coords.longitude,
+          accuracy: lastPosition.coords.accuracy,
+        };
+      }
+
+      // ——— Logging ———
+      function addLog(event, distanceM, accuracyM) {
+        if (logEmpty) {
+          els.logBody.innerHTML = '';
+          logEmpty = false;
+        }
+        const tr = document.createElement('tr');
+        tr.className = 'hover:bg-ink-50/80';
+        const distStr = distanceM != null ? `${distanceM.toFixed(1)} m` : '—';
+        const accStr = accuracyM != null ? `±${Math.round(accuracyM)} m` : '—';
+        tr.innerHTML = `
+          <td class="px-3 py-2 whitespace-nowrap text-ink-700/60">${nowStamp()}</td>
+          <td class="px-3 py-2 text-ink-800">${event}</td>
+          <td class="px-3 py-2 hidden sm:table-cell text-ink-700/70">${distStr}</td>
+          <td class="px-3 py-2 hidden sm:table-cell text-ink-700/70">${accStr}</td>
+        `;
+        els.logBody.prepend(tr);
+        while (els.logBody.children.length > 200) {
+          els.logBody.removeChild(els.logBody.lastChild);
+        }
+      }
+
+      els.clearLogsBtn.addEventListener('click', () => {
+        els.logBody.innerHTML =
+          '<tr><td colspan="4" class="px-3 py-6 text-center text-ink-700/40 font-sans">No events yet</td></tr>';
+        logEmpty = true;
+      });
+
+      // ——— UI: status badge ———
+      const BADGE_STYLES = {
+        [STATES.WAITING]: {
+          badge: 'border-ink-200',
+          label: 'text-ink-700/50 bg-ink-100',
+          text: 'WAITING FOR GPS…',
+        },
+        [STATES.IN_BRANCH]: {
+          badge: 'border-leaf-400/40 bg-leaf-400/5',
+          label: 'text-leaf-600 bg-leaf-400/15',
+          text: 'IN BRANCH',
+        },
+        [STATES.TEA_STALL]: {
+          badge: 'border-amber-400/50 bg-amber-400/5',
+          label: 'text-amber-500 bg-amber-400/15',
+          text: 'TEA STALL / GRACE PERIOD',
+        },
+        [STATES.OUTSIDE]: {
+          badge: 'border-coral-400/50 bg-coral-400/5',
+          label: 'text-coral-500 bg-coral-400/15',
+          text: 'OUTSIDE / IN TRANSIT',
+        },
+      };
+
+      function renderBadge() {
+        const s = BADGE_STYLES[state];
+        els.statusBadge.className =
+          `rounded-2xl border px-5 py-6 sm:px-8 sm:py-8 text-center transition-colors duration-300 ${s.badge}`;
+        els.statusLabel.className =
+          `inline-flex items-center gap-2 rounded-full px-5 py-2.5 text-sm sm:text-base font-semibold badge-pulse ${s.label}`;
+        els.statusText.textContent = s.text;
+
+        if (state === STATES.TEA_STALL && graceDeadline) {
+          els.graceCountdown.classList.remove('hidden');
+          updateGraceDisplay();
+        } else {
+          els.graceCountdown.classList.add('hidden');
+        }
+
+        updateGeofenceStyle();
+      }
+
+      function updateGraceDisplay() {
+        if (!graceDeadline) return;
+        const remaining = Math.max(0, Math.ceil((graceDeadline - Date.now()) / 1000));
+        els.graceSeconds.textContent = remaining;
+      }
+
+      // ——— Map (Leaflet) ———
+      const branchIcon = L.divIcon({
+        className: '',
+        html: '<div class="map-pin map-pin-branch"><span>B</span></div>',
+        iconSize: [28, 28],
+        iconAnchor: [14, 28],
+        popupAnchor: [0, -28],
+      });
+
+      const staffIcon = L.divIcon({
+        className: '',
+        html: '<div class="map-pin map-pin-staff"><span>S</span></div>',
+        iconSize: [28, 28],
+        iconAnchor: [14, 28],
+        popupAnchor: [0, -28],
+      });
+
+      const streetLayer = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        maxZoom: 19,
+        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+      });
+
+      const satLayer = L.tileLayer(
+        'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+        {
+          maxZoom: 19,
+          attribution: 'Tiles &copy; Esri',
+        }
+      );
+
+      const map = L.map('map', {
+        center: [SAMPLE_LAT, SAMPLE_LNG],
+        zoom: 17,
+        zoomControl: true,
+        layers: [streetLayer],
+      });
+
+      let activeBase = 'street';
+      let branchMarker = null;
+      let geofenceCircle = null;
+      let staffMarker = null;
+      let accuracyCircle = null;
+
+      function setBaseLayer(which) {
+        if (which === activeBase) return;
+        if (which === 'sat') {
+          map.removeLayer(streetLayer);
+          satLayer.addTo(map);
+          activeBase = 'sat';
+          els.layerSatBtn.className = 'px-3 py-1.5 bg-ink-800 text-white transition-colors';
+          els.layerStreetBtn.className = 'px-3 py-1.5 text-ink-700 hover:bg-ink-50 transition-colors';
+        } else {
+          map.removeLayer(satLayer);
+          streetLayer.addTo(map);
+          activeBase = 'street';
+          els.layerStreetBtn.className = 'px-3 py-1.5 bg-ink-800 text-white transition-colors';
+          els.layerSatBtn.className = 'px-3 py-1.5 text-ink-700 hover:bg-ink-50 transition-colors';
+        }
+      }
+
+      els.layerStreetBtn.addEventListener('click', () => setBaseLayer('street'));
+      els.layerSatBtn.addEventListener('click', () => setBaseLayer('sat'));
+
+      function updateGeofenceStyle() {
+        if (!geofenceCircle) return;
+        const c = FENCE_COLORS[state] || FENCE_COLORS[STATES.WAITING];
+        geofenceCircle.setStyle({
+          color: c.color,
+          fillColor: c.fill,
+          fillOpacity: 0.18,
+          weight: 2,
+          opacity: 0.9,
+        });
+      }
+
+      function syncBranchOnMap(fit) {
+        const branch = getBranchCoords();
+        if (!branch) {
+          if (branchMarker) { map.removeLayer(branchMarker); branchMarker = null; }
+          if (geofenceCircle) { map.removeLayer(geofenceCircle); geofenceCircle = null; }
+          return;
+        }
+
+        const latlng = [branch.lat, branch.lng];
+        const radius = getRadius();
+
+        if (!branchMarker) {
+          branchMarker = L.marker(latlng, { icon: branchIcon, zIndexOffset: 400 })
+            .addTo(map)
+            .bindPopup('Branch');
+        } else {
+          branchMarker.setLatLng(latlng);
+        }
+
+        if (!geofenceCircle) {
+          geofenceCircle = L.circle(latlng, {
+            radius,
+            color: '#1a8055',
+            fillColor: '#22a06b',
+            fillOpacity: 0.18,
+            weight: 2,
+          }).addTo(map);
+        } else {
+          geofenceCircle.setLatLng(latlng);
+          geofenceCircle.setRadius(radius);
+        }
+        updateGeofenceStyle();
+
+        if (fit) {
+          const bounds = geofenceCircle.getBounds();
+          if (staffMarker) bounds.extend(staffMarker.getLatLng());
+          map.fitBounds(bounds.pad(0.35));
+        }
+      }
+
+      function syncStaffOnMap(lat, lng, accuracy, fit) {
+        const latlng = [lat, lng];
+
+        if (!staffMarker) {
+          staffMarker = L.marker(latlng, {
+            icon: staffIcon,
+            draggable: true,
+            autoPan: true,
+            zIndexOffset: 600,
+          })
+            .addTo(map)
+            .bindPopup('Staff — drag to simulate walk');
+
+          staffMarker.on('dragstart', () => {
+            suppressMapClick = true;
+          });
+
+          staffMarker.on('drag', (e) => {
+            const p = e.target.getLatLng();
+            if (accuracyCircle) accuracyCircle.setLatLng(p);
+            els.currentLat.textContent = p.lat.toFixed(6);
+            els.currentLng.textContent = p.lng.toFixed(6);
+          });
+
+          staffMarker.on('dragend', (e) => {
+            const p = e.target.getLatLng();
+            setTimeout(() => { suppressMapClick = false; }, 50);
+            setManualStaff(p.lat, p.lng, accuracy != null ? accuracy : 10);
+            addLog(`Staff dragged to ${p.lat.toFixed(5)}, ${p.lng.toFixed(5)}`, null, null);
+          });
+        } else {
+          staffMarker.setLatLng(latlng);
+        }
+
+        const acc = accuracy != null && accuracy > 0 ? accuracy : 10;
+        if (!accuracyCircle) {
+          accuracyCircle = L.circle(latlng, {
+            radius: acc,
+            color: '#2563eb',
+            fillColor: '#3b82f6',
+            fillOpacity: 0.08,
+            weight: 1,
+            opacity: 0.35,
+            interactive: false,
+          }).addTo(map);
+        } else {
+          accuracyCircle.setLatLng(latlng);
+          accuracyCircle.setRadius(acc);
+        }
+
+        if (fit && geofenceCircle) {
+          const bounds = geofenceCircle.getBounds();
+          bounds.extend(latlng);
+          map.fitBounds(bounds.pad(0.35));
+        }
+      }
+
+      function setManualStaff(lat, lng, accuracy) {
+        followGps = false;
+        els.followGpsBtn.classList.remove('hidden');
+        lastPosition = {
+          _manual: true,
+          coords: { latitude: lat, longitude: lng, accuracy: accuracy || 10 },
+          timestamp: Date.now(),
+        };
+        els.currentLat.textContent = lat.toFixed(6);
+        els.currentLng.textContent = lng.toFixed(6);
+        els.gpsAccuracy.textContent = `±${Math.round(accuracy || 10)} m (manual)`;
+        els.lastPing.textContent = nowStamp();
+        els.gpsStatus.textContent = 'Manual (dragged)';
+        els.gpsStatus.className = 'text-xs font-medium text-amber-500';
+        syncStaffOnMap(lat, lng, accuracy || 10, false);
+        evaluatePosition(lat, lng, accuracy || 10, { skipLogPing: false, source: 'drag' });
+      }
+
+      function enableFollowGps() {
+        followGps = true;
+        els.followGpsBtn.classList.add('hidden');
+        if (liveGpsPosition) {
+          onPosition(liveGpsPosition);
+        } else {
+          els.gpsStatus.textContent = 'Following GPS…';
+          els.gpsStatus.className = 'text-xs font-medium text-ink-700/40';
+        }
+        addLog('Follow GPS resumed', null, null);
+      }
+
+      els.followGpsBtn.addEventListener('click', enableFollowGps);
+
+      map.on('click', (e) => {
+        if (suppressMapClick) return;
+        const { lat, lng } = e.latlng;
+        els.branchLat.value = lat.toFixed(6);
+        els.branchLng.value = lng.toFixed(6);
+        syncBranchOnMap(true);
+        addLog(`Branch set by map click (${lat.toFixed(5)}, ${lng.toFixed(5)})`, null, null);
+        const staff = getStaffCoords();
+        if (staff) {
+          evaluatePosition(staff.lat, staff.lng, staff.accuracy, { source: 'branch-click' });
+        }
+      });
+
+      // Fix tile sizing after layout
+      setTimeout(() => {
+        map.invalidateSize();
+        mapReady = true;
+      }, 100);
+      window.addEventListener('resize', () => map.invalidateSize());
+
+      // ——— State machine ———
+      function setState(next, distanceM, accuracyM) {
+        if (next === state) return;
+        const prev = state;
+        state = next;
+        renderBadge();
+        addLog(`State: ${prev} → ${next}`, distanceM, accuracyM);
+      }
+
+      function clearGraceTimer() {
+        if (graceTimerId != null) {
+          clearInterval(graceTimerId);
+          graceTimerId = null;
+        }
+        graceDeadline = null;
+      }
+
+      function startGracePeriod(distanceM, accuracyM) {
+        const secs = getGraceSeconds();
+        graceDeadline = Date.now() + secs * 1000;
+        setState(STATES.TEA_STALL, distanceM, accuracyM);
+        addLog(`Grace period started (${secs}s)`, distanceM, accuracyM);
+
+        if (graceTimerId != null) clearInterval(graceTimerId);
+        graceTimerId = setInterval(() => {
+          updateGraceDisplay();
+          if (Date.now() >= graceDeadline) {
+            clearGraceTimer();
+            setState(STATES.OUTSIDE, distanceM, accuracyM);
+            addLog('Grace period expired → OUTSIDE', distanceM, accuracyM);
+            renderBadge();
+          }
+        }, 200);
+      }
+
+      function evaluatePosition(lat, lng, accuracy, opts) {
+        opts = opts || {};
+        const branch = getBranchCoords();
+        if (!branch) {
+          els.distance.textContent = 'Set branch';
+          syncBranchOnMap(false);
+          return;
+        }
+
+        syncBranchOnMap(false);
+
+        let dist = haversineMeters(lat, lng, branch.lat, branch.lng);
+        let displayLat = lat;
+        let displayLng = lng;
+
+        if (mockOutside) {
+          dist = getRadius() + 50;
+          // Visually nudge staff just outside the fence for demo clarity
+          if (staffMarker && branchMarker) {
+            const bearing = Math.atan2(lng - branch.lng, lat - branch.lat) || 0.3;
+            const offsetM = getRadius() + 40;
+            const dLat = (offsetM / 111320) * Math.cos(bearing);
+            const dLng = (offsetM / (111320 * Math.cos((branch.lat * Math.PI) / 180))) * Math.sin(bearing);
+            displayLat = branch.lat + dLat;
+            displayLng = branch.lng + dLng;
+            staffMarker.setLatLng([displayLat, displayLng]);
+            if (accuracyCircle) accuracyCircle.setLatLng([displayLat, displayLng]);
+          }
+        } else if (!opts.skipStaffMap) {
+          syncStaffOnMap(lat, lng, accuracy, opts.fitMap);
+        }
+
+        els.distance.textContent = `${dist.toFixed(1)} m` + (mockOutside ? ' (mock)' : '');
+
+        const inside = dist <= getRadius();
+
+        if (inside) {
+          if (state === STATES.TEA_STALL) {
+            clearGraceTimer();
+            addLog('Returned inside radius during grace', dist, accuracy);
+          }
+          setState(STATES.IN_BRANCH, dist, accuracy);
+        } else {
+          if (state === STATES.IN_BRANCH || state === STATES.WAITING) {
+            startGracePeriod(dist, accuracy);
+          } else if (state === STATES.TEA_STALL) {
+            updateGraceDisplay();
+          }
+        }
+
+        if (!opts.skipLogPing) {
+          const src =
+            opts.source === 'drag' ? 'Staff drag'
+            : opts.source === 'branch-click' ? 'Branch updated'
+            : mockOutside ? 'GPS ping (mock outside)'
+            : 'GPS ping';
+          addLog(src, dist, accuracy);
+        }
+      }
+
+      // ——— Geolocation ———
+      function onPosition(pos) {
+        liveGpsPosition = pos;
+
+        if (!followGps) {
+          // Keep receiving GPS in background; don't move the demo pin
+          return;
+        }
+
+        lastPosition = pos;
+        const { latitude, longitude, accuracy } = pos.coords;
+        els.currentLat.textContent = latitude.toFixed(6);
+        els.currentLng.textContent = longitude.toFixed(6);
+        els.gpsAccuracy.textContent = `±${Math.round(accuracy)} m`;
+        els.lastPing.textContent = nowStamp();
+        els.gpsStatus.textContent = 'Tracking';
+        els.gpsStatus.className = 'text-xs font-medium text-leaf-600';
+
+        syncStaffOnMap(latitude, longitude, accuracy, !branchMarker);
+        evaluatePosition(latitude, longitude, accuracy);
+      }
+
+      function onError(err) {
+        els.gpsStatus.textContent = err.message || 'GPS error';
+        els.gpsStatus.className = 'text-xs font-medium text-coral-500';
+        addLog(`GPS error: ${err.message || err.code}`, null, null);
+      }
+
+      function getCurrentPositionWithFallback(success, failure, opts) {
+        const useOpts = opts || GEO_OPTS;
+        navigator.geolocation.getCurrentPosition(
+          success,
+          (err) => {
+            if (err.code === 3) {
+              addLog('Location timed out — retrying with Wi-Fi positioning', null, null);
+              navigator.geolocation.getCurrentPosition(success, failure, {
+                enableHighAccuracy: false,
+                timeout: 20000,
+                maximumAge: 30000,
+              });
+            } else {
+              failure(err);
+            }
+          },
+          useOpts
+        );
+      }
+
+      function startWatch(opts, allowTimeoutRetry) {
+        if (!navigator.geolocation) {
+          els.gpsStatus.textContent = 'Geolocation not supported';
+          els.gpsStatus.className = 'text-xs font-medium text-coral-500';
+          return;
+        }
+        const useOpts = opts || GEO_OPTS;
+        const canRetry = allowTimeoutRetry !== false;
+        if (watchId != null) {
+          navigator.geolocation.clearWatch(watchId);
+          watchId = null;
+        }
+        watchId = navigator.geolocation.watchPosition(
+          onPosition,
+          (err) => {
+            if (err.code === 3 && canRetry) {
+              addLog(
+                useOpts.enableHighAccuracy
+                  ? 'High-accuracy watch timed out — falling back to Wi-Fi positioning'
+                  : 'Watch timed out — retrying with Wi-Fi positioning',
+                null,
+                null
+              );
+              els.gpsStatus.textContent = 'Retrying (Wi-Fi)…';
+              els.gpsStatus.className = 'text-xs font-medium text-amber-500';
+              startWatch(
+                { enableHighAccuracy: false, timeout: 20000, maximumAge: 30000 },
+                false
+              );
+              return;
+            }
+            onError(err);
+          },
+          useOpts
+        );
+      }
+
+      // ——— Use current as branch ———
+      els.useCurrentBtn.addEventListener('click', () => {
+        els.useCurrentBtn.disabled = true;
+        els.useCurrentBtn.textContent = 'Getting location…';
+
+        const done = () => {
+          els.useCurrentBtn.disabled = false;
+          els.useCurrentBtn.textContent = 'Use My Current Location as Branch';
+        };
+
+        const applyAsBranch = (pos) => {
+          followGps = true;
+          els.followGpsBtn.classList.add('hidden');
+          lastPosition = pos;
+          liveGpsPosition = pos;
+          els.branchLat.value = pos.coords.latitude.toFixed(6);
+          els.branchLng.value = pos.coords.longitude.toFixed(6);
+          els.currentLat.textContent = pos.coords.latitude.toFixed(6);
+          els.currentLng.textContent = pos.coords.longitude.toFixed(6);
+          els.gpsAccuracy.textContent = `±${Math.round(pos.coords.accuracy)} m`;
+          els.lastPing.textContent = nowStamp();
+          els.gpsStatus.textContent = 'Tracking';
+          els.gpsStatus.className = 'text-xs font-medium text-leaf-600';
+          syncBranchOnMap(false);
+          syncStaffOnMap(pos.coords.latitude, pos.coords.longitude, pos.coords.accuracy, true);
+          addLog('Branch set from current location', 0, pos.coords.accuracy);
+          evaluatePosition(pos.coords.latitude, pos.coords.longitude, pos.coords.accuracy, {
+            skipStaffMap: true,
+            skipLogPing: true,
+          });
+        };
+
+        if (liveGpsPosition || (lastPosition && !lastPosition._sample && !lastPosition._manual)) {
+          applyAsBranch(liveGpsPosition || lastPosition);
+          done();
+          return;
+        }
+
+        getCurrentPositionWithFallback(
+          (pos) => {
+            applyAsBranch(pos);
+            done();
+          },
+          (err) => {
+            addLog(`Could not get location: ${err.message}`, null, null);
+            alert('Could not get your location. Allow location access and try again.');
+            done();
+          }
+        );
+      });
+
+      // ——— Sample location ———
+      els.sampleLocBtn.addEventListener('click', () => {
+        els.branchLat.value = SAMPLE_LAT.toFixed(4);
+        els.branchLng.value = SAMPLE_LNG.toFixed(4);
+
+        // Pause live GPS follow and place staff on the sample branch for instant demos
+        followGps = false;
+        els.followGpsBtn.classList.remove('hidden');
+        lastPosition = {
+          _sample: true,
+          coords: {
+            latitude: SAMPLE_LAT,
+            longitude: SAMPLE_LNG,
+            accuracy: 10,
+          },
+          timestamp: Date.now(),
+        };
+        els.currentLat.textContent = SAMPLE_LAT.toFixed(4);
+        els.currentLng.textContent = SAMPLE_LNG.toFixed(4);
+        els.gpsAccuracy.textContent = '±10 m (sample)';
+        els.lastPing.textContent = nowStamp();
+        els.gpsStatus.textContent = 'Sample coords';
+        els.gpsStatus.className = 'text-xs font-medium text-amber-500';
+
+        clearGraceTimer();
+        state = STATES.WAITING;
+        syncBranchOnMap(false);
+        syncStaffOnMap(SAMPLE_LAT, SAMPLE_LNG, 10, true);
+        addLog('Sample branch + staff loaded (10.0159, 76.3419)', 0, 10);
+        evaluatePosition(SAMPLE_LAT, SAMPLE_LNG, 10, {
+          skipStaffMap: true,
+          skipLogPing: true,
+          fitMap: true,
+        });
+        map.invalidateSize();
+      });
+
+      // ——— Mock toggle ———
+      function syncMockToggle() {
+        els.mockToggle.setAttribute('aria-checked', String(mockOutside));
+        els.mockToggle.classList.toggle('bg-amber-500', mockOutside);
+        els.mockToggle.classList.toggle('bg-ink-200', !mockOutside);
+        const knob = els.mockToggle.querySelector('.toggle-knob');
+        knob.style.transform = mockOutside ? 'translateX(1.25rem)' : 'translateX(0)';
+      }
+
+      els.mockToggle.addEventListener('click', () => {
+        mockOutside = !mockOutside;
+        syncMockToggle();
+        addLog(mockOutside ? 'Mock outside ON' : 'Mock outside OFF', null, null);
+        const staff = getStaffCoords();
+        if (staff) {
+          if (!mockOutside) {
+            syncStaffOnMap(staff.lat, staff.lng, staff.accuracy, false);
+          }
+          evaluatePosition(staff.lat, staff.lng, staff.accuracy, { skipLogPing: true });
+        }
+      });
+
+      // Re-evaluate / redraw when branch params change
+      function onBranchParamsChange() {
+        syncBranchOnMap(false);
+        const staff = getStaffCoords();
+        if (staff) {
+          evaluatePosition(staff.lat, staff.lng, staff.accuracy, { skipLogPing: true });
+        }
+      }
+
+      ['branchLat', 'branchLng'].forEach((id) => {
+        $(id).addEventListener('change', onBranchParamsChange);
+      });
+      els.geofenceRadius.addEventListener('input', () => {
+        if (geofenceCircle) geofenceCircle.setRadius(getRadius());
+      });
+      els.geofenceRadius.addEventListener('change', onBranchParamsChange);
+      els.gracePeriod.addEventListener('change', onBranchParamsChange);
+
+      // Init
+      renderBadge();
+      syncMockToggle();
+      startWatch();
+      addLog('App started — waiting for GPS', null, null);
+      addLog('Tip: Load Sample Location, then drag the blue staff pin outside the circle', null, null);
+    })();
+  </script>
+</body>
+</html>

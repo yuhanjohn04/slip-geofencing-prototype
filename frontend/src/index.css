@@ -1,0 +1,108 @@
+@import "tailwindcss";
+@import "leaflet/dist/leaflet.css";
+
+@theme {
+  --font-sans: "DM Sans", system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, monospace;
+  --color-ink-50: #f4f6f5;
+  --color-ink-100: #e4e9e7;
+  --color-ink-200: #c5d0cc;
+  --color-ink-700: #2a3a36;
+  --color-ink-800: #1a2824;
+  --color-ink-900: #0f1916;
+  --color-leaf-400: #3ecf8e;
+  --color-leaf-500: #22a06b;
+  --color-leaf-600: #1a8055;
+  --color-amber-400: #f5b942;
+  --color-amber-500: #e09b1a;
+  --color-coral-400: #f07167;
+  --color-coral-500: #e04a40;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  font-family: var(--font-sans);
+  color: var(--color-ink-800);
+  background:
+    radial-gradient(ellipse 80% 50% at 10% -10%, rgba(34, 160, 107, 0.12), transparent),
+    radial-gradient(ellipse 60% 40% at 100% 0%, rgba(224, 155, 26, 0.08), transparent),
+    #f4f6f5;
+  -webkit-font-smoothing: antialiased;
+}
+
+#map {
+  height: 350px;
+  width: 100%;
+  z-index: 0;
+}
+
+.leaflet-container {
+  font-family: inherit;
+  background: #e4e9e7;
+}
+
+.map-pin {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 50% 50% 50% 0;
+  transform: rotate(-45deg);
+  border: 2px solid #fff;
+  box-shadow: 0 2px 8px rgba(15, 25, 22, 0.35);
+}
+
+.map-pin span {
+  transform: rotate(45deg);
+  font-size: 11px;
+  font-weight: 700;
+  color: #fff;
+  line-height: 1;
+}
+
+.map-pin-branch {
+  background: #1a2824;
+}
+
+.map-pin-staff {
+  background: #2563eb;
+  cursor: grab;
+}
+
+.map-pin-staff:active {
+  cursor: grabbing;
+}
+
+.leaflet-div-icon {
+  background: transparent;
+  border: none;
+}
+
+.badge-pulse {
+  animation: badgePulse 2s ease-in-out infinite;
+}
+
+@keyframes badgePulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 currentColor;
+  }
+  50% {
+    box-shadow: 0 0 0 8px transparent;
+  }
+}
+
+.log-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: #c5d0cc transparent;
+}
+
+.toggle-track {
+  transition: background-color 0.2s ease;
+}
+
+.toggle-knob {
+  transition: transform 0.2s ease;
+}

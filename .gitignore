@@ -1,0 +1,27 @@
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.env
+.env.*
+
+# Node / Vite
+node_modules/
+dist/
+.vite/
+
+# Flutter / Dart
+.dart_tool/
+.packages
+.flutter-plugins
+.flutter-plugins-dependencies
+build/
+.gradle/
+android/local.properties
+*.jks
+*.keystore
+
+# OS / misc
+.DS_Store
+*.log

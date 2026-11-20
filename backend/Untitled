@@ -1,0 +1,13 @@
+
+1. **Install Flutter SDK:**
+   - Check if `brew` and `flutter` are already installed.
+   - Install Flutter (`brew install --cask flutter` or verify `flutter --version` if already installed) and ensure `flutter` is in `~/.zshrc`.
+
+2. **Connect Existing Android Studio / SDK:**
+   - Check if Android Studio is in `/Applications/Android Studio.app` and if `$HOME/Library/Android/sdk` exists.
+   - Configure `ANDROID_HOME` (`$HOME/Library/Android/sdk`) and Android SDK `platform-tools` / `cmdline-tools` paths in `~/.zshrc` if needed.
+   - Run `flutter doctor --android-licenses` and `flutter doctor` to check what passes or still needs to be installed inside Android Studio's SDK Manager.
+
+3. **Create Starter GPS Test App:**
+   - Create a Flutter project named `slip_gps_test` and add `geolocator` (`flutter pub add geolocator`).
+   - Show me the exact commands to run once my colleague's Android phone is connected via USB (`flutter devices` and `flutter run`).
